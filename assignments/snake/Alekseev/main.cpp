@@ -8,6 +8,10 @@
 #include <ctime>
 #include <cstdlib>
 #include <ncurses.h>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <unistd.h>
 
 enum {LEFT=1, UP, RIGHT, DOWN, STOP_GAME='q'};
 enum {MAX_TAIL_SIZE=1000, START_TAIL_SIZE=3, MAX_FOOD_SIZE=20, FOOD_EXPIRE_SECONDS=10, SPEED=20000, SEED_NUMBER=3};
@@ -30,50 +34,56 @@ public:
     char head, body;
     std::vector<Tail> tail;
 
-    Snake() : x(0), y(2), direction(RIGHT), tsize(START_TAIL_SIZE+1) {
+    Snake(int xx, int yy, char c1, char c2, int d) : x(xx), y(yy), direction(d), 
+	head(c1), body(c2), tsize(START_TAIL_SIZE+1) {
         tail.resize(MAX_TAIL_SIZE);
     }
 
-    void head_and_body(char c1, char c2) {
-	head = c1;
-	body = c2;
-    }
-
-    void move() {
+    void move(std::mutex& M) {
         int max_x = 0, max_y = 0;
         getmaxyx(stdscr, max_y, max_x);
-        mvprintw(y, x, " ");
+	
+	M.lock();
+        
+	mvprintw(y, x, " ");
 
         switch (direction) {
             case LEFT:
                 if (x <= 0) x = max_x;
-                mvprintw(y, --x, "%c", head);
+		x--;
                 break;
             case RIGHT:
                 if (x >= max_x) x = 0;
-                mvprintw(y, ++x, "%c", head);
-                break;
+                x++;
+		break;
             case UP:
                 if (y <= 0) y = max_y;
-                mvprintw(--y, x, "%c", head);
-                break;
+                y--;
+		break;
             case DOWN:
                 if (y >= max_y) y = 0;
-                mvprintw(++y, x, "%c", head);
+                y++;
                 break;
         }
+        mvprintw(y, x, "%c", head);
         refresh();
+	M.unlock();
     }
 
-    void moveTail() {
-        mvprintw(tail[tsize - 1].y, tail[tsize - 1].x, " ");
-        for (size_t i = tsize - 1; i > 0; i--) {
+    void moveTail(std::mutex& M) {
+	
+	M.lock();
+        
+	mvprintw(tail[tsize - 1].y, tail[tsize - 1].x, " ");
+	for (size_t i = tsize - 1; i > 0; i--) {
             tail[i] = tail[i - 1];
             if (tail[i].y || tail[i].x) {
                 mvprintw(tail[i].y, tail[i].x, "%c", body);
             }
         }
-        tail[0].x = x;
+	M.unlock();
+        
+	tail[0].x = x;
         tail[0].y = y;
     }
 
@@ -93,35 +103,41 @@ public:
     }
 };
 
-class Work_with_food {
+class Game {
     std::vector<Food> food;
-public:
+    Snake snake1, snake2;
+    std::mutex M;
+    std::atomic<bool> run_cont = true;
+    int key_pressed;
     
-    Work_with_food() {
+    void init_food() {
 	food.resize(MAX_FOOD_SIZE);
 	int max_y = 0, max_x = 0;
     	getmaxyx(stdscr, max_y, max_x);
     	for (auto& f : food) {
      	   f = {0, 0, 0, '$', false};
 	}
-        putFood();
+        //putFood();
     }
 
     void putFoodSeed(Food& fp) {
     	int max_x = 0, max_y = 0;
     	getmaxyx(stdscr, max_y, max_x);
-    	mvprintw(fp.y, fp.x, " ");
-    	fp.x = rand() % (max_x - 1);
-    	fp.y = rand() % (max_y - 2) + 1;
+	M.lock();
+	mvprintw(fp.y, fp.x, " ");
+	fp.x = rand() % (max_x - 1);
+    	fp.y = rand() % (max_y - 3) + 2;
     	fp.put_time = time(nullptr);
     	fp.enable = true;
     	mvprintw(fp.y, fp.x, "%c", fp.point);
+	M.unlock();
     }
 
     void putFood() {
     	for (auto& f : food) {
     	    putFoodSeed(f);
     	}
+	refresh();
     }
 
     void refreshFood() {
@@ -135,7 +151,9 @@ public:
     bool haveEat(Snake& snake) {
     	for (auto& f : food) {
             if (f.enable && snake.x == f.x && snake.y == f.y) {
-            	f.enable = false;
+            	M.lock();
+		f.enable = false;
+		M.unlock();
                 return true;
             }
     	}
@@ -151,32 +169,71 @@ public:
             }
     	}
     }
-};
 
-class Game {
-    Work_with_food meal;
-    Snake snake;
-    int key_pressed;
-   
-    void changeDirection(int& new_direction, int key) {
-	switch (key) {
-	    case KEY_DOWN: new_direction = DOWN; break;
-	    case KEY_UP: new_direction = UP; break;
-            case KEY_LEFT: new_direction = LEFT; break;
-            case KEY_RIGHT: new_direction = RIGHT; break;
+    bool snakes_collided(Snake& snake) {
+	if (snake.head == '@') {
+            for (size_t i = 1; i < snake2.tsize; ++i) {
+            	if (snake.x == snake2.tail[i].x && snake.y == snake2.tail[i].y) return true;
+            }
+            return false;
 	}
+	else {
+            for (size_t i = 1; i < snake1.tsize; ++i) {
+            	if (snake.x == snake1.tail[i].x && snake.y == snake1.tail[i].y) return true;
+            }
+            return false;
+
+	}
+    }
+   
+    void changeDirection(int key) {
+	M.lock();
+	switch (key) {
+	    case KEY_DOWN: if (snake2.direction != UP) 
+			       snake2.direction = DOWN; 
+			   break;
+	    case 's': if (snake1.direction != UP)
+		          snake1.direction = DOWN;
+		      break;
+	    case KEY_UP: if (snake2.direction != DOWN)
+			     snake2.direction = UP; 
+			 break;
+	    case 'w': if (snake1.direction != DOWN)
+		          snake1.direction = UP; 
+		      break;
+            case KEY_LEFT: if (snake2.direction != RIGHT)
+			       snake2.direction = LEFT; 
+			   break;
+            case 'a': if (snake1.direction != RIGHT)
+		          snake1.direction = LEFT; 
+		      break;
+            case KEY_RIGHT: if (snake2.direction != LEFT)
+			        snake2.direction = RIGHT; 
+			    break;
+            case 'd': if (snake1.direction != LEFT)
+		          snake1.direction = RIGHT; 
+		      break;
+	}
+	M.unlock();
     }
    
     void printLevel() {
         int max_x = 0, max_y = 0;
 	getmaxyx(stdscr, max_y, max_x);
-	mvprintw(0, max_x - 10, "LEVEL: %zu", snake.tsize);
+	
+	M.lock();
+
+	mvprintw(0, max_x - 10, "LEVEL1: %zu", snake1.tsize);
+	mvprintw(1, max_x - 10, "LEVEL2: %zu", snake2.tsize);
+	refresh();
+	M.unlock();
     }
    
     void printExit() {
     	int max_x = 0, max_y = 0;
     	getmaxyx(stdscr, max_y, max_x);
-    	mvprintw(max_y / 2, max_x / 2 - 5, "Your LEVEL is %zu", snake.tsize);
+    	mvprintw(max_y / 2, max_x / 2 - 5, "Snake1 LEVEL is %zu", snake1.tsize);
+    	mvprintw(max_y / 2 + 2, max_x / 2 - 5, "Snake2 LEVEL is %zu", snake2.tsize);
     }
 
     void end_game() {
@@ -188,41 +245,65 @@ class Game {
 
 public:
 
-    Game() {
-        snake.head_and_body('@', '*');
+    Game() : snake1(0, 3, '@', '*', RIGHT), snake2(0, 25, '&', '+', LEFT) {
 	key_pressed = 0;
 	srand(time(nullptr));
+	init_food();
 	
 	initscr();
 	keypad(stdscr, TRUE);
 	raw();
 	noecho();
 	curs_set(FALSE);
-	
+
 	mvprintw(0, 0, " Use arrows for control. Press 'q' for EXIT");
-	timeout(0);
+	refresh();
+	timeout(10);
+    }
+
+    void snake_run(Snake& snake) {
+	while (run_cont) {
+            if (snake.isCrash()) {
+		run_cont = false;
+		break;
+	    }
+	    if (snakes_collided(snake)) {
+		run_cont = false;
+		break;
+	    }
+
+            snake.move(M);
+            snake.moveTail(M);
+
+            if (haveEat(snake)) {
+            	snake.addTail();
+            }
+
+	    repairSeed(snake);
+
+	    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
     }
 
     void run() {
-        while (key_pressed != STOP_GAME) {
-            key_pressed = getch();
-            changeDirection(snake.direction, key_pressed);
+	putFood();
+	printLevel();
+
+	std::thread s1(&Game::snake_run, this, std::ref(snake1));
+	std::thread s2(&Game::snake_run, this, std::ref(snake2));
         
-            if (snake.isCrash()) break;
+	while (key_pressed != STOP_GAME && run_cont) {
+            key_pressed = getch();
+            changeDirection(key_pressed);
 
-            snake.move();
-            snake.moveTail();
-
-            if (meal.haveEat(snake)) {
-            	snake.addTail();
-            	printLevel();
-            }
-
-            meal.refreshFood();
-            meal.repairSeed(snake);
-
-            timeout(100);
+	    refreshFood();
+            printLevel();
+            
+	    timeout(100);
         }
+	run_cont = false;
+	s1.join();
+	s2.join();
 	end_game();
     }
 };
