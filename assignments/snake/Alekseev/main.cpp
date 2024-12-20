@@ -107,6 +107,7 @@ public:
         }
     }
 
+    // проврка, что бонус продолжает действовать
     void check_bonus(){
 	if (bonus && (time(nullptr) - time_bonus) > TIME_DO_BONUS){
 	    bonus = false;
@@ -121,6 +122,7 @@ public:
     }
 };
 
+// класс препятствий, столкновение змейки с ним ведёт к концу игры
 class Bariers {
 public:
     std::vector<Barier> bar;
@@ -163,6 +165,7 @@ public:
 	M.unlock();
     }
 
+    // проверка на столкновение змейки с препятствием
     bool crashBarier(Snake& snake) {
     	for (auto& b : bar) {
             if (snake.x == b.x && snake.y == b.y) {
@@ -173,6 +176,7 @@ public:
     }
 };
 
+// Бонус даёт ускорение, на карте единовременно присутствует только один
 class Bonus {
 public:
     std::vector<Food> bon;
@@ -245,8 +249,8 @@ class Game {
     Bariers Bar;
     Bonus Bon;
     Snake snake1, snake2;
-    std::mutex M;
-    std::atomic<bool> run_cont = true;
+    std::mutex M; // мьютех для корректного доступа к изменению игрового поля для разных потоков
+    std::atomic<bool> run_cont = true; // атомарная переменная, с помощью которой все потоки завершат работу
     int key_pressed;
     
     void init_food() {
@@ -310,15 +314,16 @@ class Game {
     	}
     }
 
+    // Проверка на столкновение змеек
     bool snakes_collided(Snake& snake) {
 	if (snake.head == '@') {
-            for (size_t i = 1; i < snake2.tsize; ++i) {
+            for (size_t i = 0; i < snake2.tsize; ++i) {
             	if (snake.x == snake2.tail[i].x && snake.y == snake2.tail[i].y) return true;
             }
             return false;
 	}
 	else {
-            for (size_t i = 1; i < snake1.tsize; ++i) {
+            for (size_t i = 0; i < snake1.tsize; ++i) {
             	if (snake.x == snake1.tail[i].x && snake.y == snake1.tail[i].y) return true;
             }
             return false;
@@ -326,6 +331,8 @@ class Game {
 	}
     }
    
+    // реализованы две змейки, вторая умправляется 'wasd'
+    // есть частичная защита от смерти при попытке двигаться в противоположную сторону
     void changeDirection(int key) {
 	M.lock();
 	switch (key) {
@@ -403,6 +410,7 @@ public:
 	timeout(10);
     }
 
+    // поток для препятствий
     void barier_run(){
 	while (run_cont) {
 	    Bar.refreshBarier(M);
@@ -410,6 +418,7 @@ public:
 	}
     }
 
+    // поток для бонусов
     void bonus_run(){
 	while (run_cont) {
 	    Bon.refreshBonus(M);
@@ -418,6 +427,7 @@ public:
 
     }
 
+    // поток для змейки, под управлением игрока
     void snake_run(Snake& snake) {
 	while (run_cont) {
             if (snake.isCrash() || snakes_collided(snake) || Bar.crashBarier(snake)) {
@@ -436,18 +446,21 @@ public:
 	    Bon.repairBonusSeed(snake, M);
             snake.check_bonus();
 
+	    // бонус ускоряет движение змейки, путм уменьшения времени бездействия потока
 	    if (snake.bonus) std::this_thread::sleep_for(std::chrono::milliseconds(70));
 	    else std::this_thread::sleep_for(std::chrono::milliseconds(120));
 	}
     }
 
     void run() {
+	// инициализация всех структур поля
 	putFood();
 	Bar.putBarier(M);
 	Bon.putBonus(M);
 	printLevel();
 	refresh();
 
+	// создаём отдельные потоки для змеек, препятствий, бонусов
 	std::thread s1(&Game::snake_run, this, std::ref(snake1));
 	std::thread s2(&Game::snake_run, this, std::ref(snake2));
 	std::thread b(&Game::barier_run, this);
